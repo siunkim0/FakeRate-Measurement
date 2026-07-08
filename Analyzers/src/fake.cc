@@ -1,7 +1,7 @@
 #include "fake.h"
 
 //==== Constructor and Destructor
-fake::fake() : MeasFakeMu8(false), MeasFakeMu17(false), RunSyst(false) {}
+fake::fake() : MeasFakeMu8(false), MeasFakeMu17(false) {}
 fake::~fake() {}
 
 //==== Initialize variables
@@ -10,7 +10,6 @@ void fake::initializeAnalyzer() {
     //==== Userflags
     MeasFakeMu8  = HasFlag("MeasFakeMu8");   // Mu8 트리거 경로만 측정
     MeasFakeMu17 = HasFlag("MeasFakeMu17");  // Mu17 트리거 경로만 측정
-    RunSyst      = HasFlag("RunSyst");       // away jet pT 시스테마틱 추가
 
     //==== 플래그가 없으면 두 경로 모두 측정
     if (!MeasFakeMu8 && !MeasFakeMu17) {
@@ -24,14 +23,13 @@ void fake::initializeAnalyzer() {
     if (MeasFakeMu17) paths.push_back({"Mu17", "HLT_Mu17_TrkIsoVVL", 20., 30.});
 
     //==== systematic 목록: Central = away jet pT > 40 GeV
-    systs = {"Central"};
-    if (RunSyst) {
-        systs.push_back("AwayJetPt30");   // away jet pT > 30 GeV
-        systs.push_back("AwayJetPt60");   // away jet pT > 60 GeV
-    }
+    //==== away jet pT variation 은 2D 히스토그램 몇 개만 더 채우는 것이라
+    //==== 부담이 없으므로 항상 켠다
+    systs = {"Central", "AwayJetPt30", "AwayJetPt60"};
 
     //==== fake rate 2D 히스토그램 binning: cone-corrected pT x |eta|
-    ptCorrBins = {10., 12., 14., 17., 20., 30., 50., 100.};
+    //==== 공식 측정처럼 [100,200] 을 따로 둔다 (FR 파일을 만들 때는 100 까지만 사용)
+    ptCorrBins = {10., 12., 14., 17., 20., 30., 50., 100., 200.};
     absEtaBins = {0., 0.9, 1.6, 2.4};
 
     //==== era 별 jet |eta| 컷
@@ -40,9 +38,6 @@ void fake::initializeAnalyzer() {
     } else {
         cuts.jet_eta_max = 2.5;
     }
-
-    //==== electron veto 용 loose ID
-    electronLooseID = (Run == 2) ? "HcToWALooseRun2" : "HcToWALooseRun3";
 
     myCorr = new MyCorrection(DataEra, DataPeriod, IsDATA ? DataStream : MCSample, IsDATA);
 }
@@ -70,6 +65,36 @@ bool fake::PassMuonWP(const Muon &mu, const TString &wp) const {
     return true;
 }
 
+//==============================================================
+// Electron veto WP: 공식 HcToWALooseRun2 (Run 2 전용)
+// framework Electron::Pass_HcToWALooseRun2() 는 raw MVA 컷 부호가
+// 반전된 버그가 있어 직접 구현한다 (elecfake.cc 의 loose WP 와 동일)
+//==============================================================
+bool fake::PassElectronVeto(const Electron &el) const {
+    if (!el.Pass_HcToWABaseline()) return false;
+    if (!(el.SIP3D() < 8.)) return false;
+    if (!(el.MiniPFRelIso() < 0.4)) return false;
+    //==== raw MVANoIso 컷 (IB, OB, EC); wp90 통과도 인정 (tight ⊂ loose)
+    float mvaCut = 0.85;
+    if (el.etaRegion() == Electron::ETAREGION::IB)      mvaCut = 0.985;
+    else if (el.etaRegion() == Electron::ETAREGION::OB) mvaCut = 0.96;
+    if (!(el.isMVANoIsoWP90() || el.MvaNoIso() > mvaCut)) return false;
+    return true;
+}
+
+//==============================================================
+// jet 단위 veto map: 공식 framework 의 로직을 직접 구현
+// (우리 fork 의 AnalyzerCore::PassVetoMap 은 muon dR < 0.2 이거나
+//  loose PU ID 를 통과 못 한 jet 자체를 veto 해 버려 동작이 다르다)
+// EM fraction > 0.9 또는 muon dR < 0.2 인 jet 은 검사 대상에서 제외
+//==============================================================
+bool fake::PassVetoMapJet(const Jet &jet, const RVec<Muon> &muons) const {
+    if (jet.chEmEF() + jet.neEmEF() > 0.9) return true;
+    for (const auto &mu : muons)
+        if (jet.DeltaR(mu) < 0.2) return true;
+    return !myCorr->IsJetVetoZone(jet.Eta(), jet.Phi(), "jetvetomap");
+}
+
 void fake::executeEvent() {
 
     //==== 이벤트와 raw physics object 읽기
@@ -80,6 +105,10 @@ void fake::executeEvent() {
     if (!PassNoiseFilter(rawJets, ev)) return;
 
     RVec<Muon> rawMuons = GetAllMuons();
+
+    //==== jet veto map (공식 측정과 동일하게 event 단위로 적용)
+    if (!PassVetoMap(rawJets, rawMuons, "jetvetomap")) return;
+
     RVec<Electron> rawElectrons = GetAllElectrons();
     sort(rawMuons.begin(), rawMuons.end(), PtComparing);
 
@@ -93,23 +122,55 @@ void fake::executeEvent() {
         if (PassMuonWP(mu, "tight")) tightMuons.push_back(mu);
     }
 
-    //==== Step 2: loose electron 선택 (single-muon 이벤트 요구할 때 veto 용)
-    looseElectrons = SelectElectrons(rawElectrons, electronLooseID,
-                                     cuts.electron_pt_min, cuts.electron_eta_max);
+    //==== Step 2: veto 용 loose electron 선택 (framework loose ID 의
+    //====         raw MVA 컷 반전 버그 때문에 PassElectronVeto 로 직접 선택)
+    looseElectrons.clear();
+    for (const auto &el : rawElectrons) {
+        if (!(el.Pt() > cuts.electron_pt_min)) continue;
+        if (!(fabs(el.Eta()) < cuts.electron_eta_max)) continue;
+        if (PassElectronVeto(el)) looseElectrons.push_back(el);
+    }
 
-    //==== Step 3: jet 선택 - tight ID (+ Run2 는 loose PU ID),
-    //====         loose lepton 과 dR < 0.4 로 겹치는 jet 은 제거
+    //==== Step 3: jet 선택 (공식 측정과 같은 순서)
+    //====         tight ID → loose lepton 과 dR < 0.4 로 겹치는 jet 제거
+    //====         → jet 단위 veto map → loose PU ID (Run2)
     jets = SelectJets(rawJets, "tight", cuts.jet_pt_min, cuts.jet_eta_max);
-    if (Run == 2) jets = SelectJets(jets, "loosePuId", cuts.jet_pt_min, cuts.jet_eta_max);
     jets = JetsVetoLeptonInside(jets, looseElectrons, looseMuons, cuts.jet_lep_dr);
+    RVec<Jet> jetsNoPuId;   // PU ID SF 계산용 (PU ID 적용 전)
+    if (Run == 2) {
+        RVec<Jet> vetoMapped;
+        for (const auto &jet : jets)
+            if (PassVetoMapJet(jet, rawMuons)) vetoMapped.push_back(jet);
+        jetsNoPuId = vetoMapped;
+        jets = SelectJets(vetoMapped, "loosePuId", cuts.jet_pt_min, cuts.jet_eta_max);
+    }
     sort(jets.begin(), jets.end(), PtComparing);
 
     //==== Step 4: PUPPI MET + Type-I correction
     METv = ApplyTypeICorrection(ev.GetMETVector(Event::MET_Type::PUPPI),
                                 rawJets, rawElectrons, rawMuons);
 
-    //==== Step 5: gen 정보 (MC 에서 prompt / fake 구분용)
+    //==== Step 5: gen 정보 (MC 에서 prompt / fake 구분 + PU ID SF 용)
     gens = IsDATA ? RVec<Gen>() : GetAllGens();
+    genJets = IsDATA ? RVec<GenJet>() : GetAllGenJets();
+
+    //==== 트리거 경로 공통 event weight 보정 (MC only, 공식 측정과 동일한 세트)
+    float evtSF = 1.;
+    if (!IsDATA) {
+        //==== top pT reweight (TT 샘플만 해당)
+        if (MCSample.Contains("TTLL") || MCSample.Contains("TTLJ"))
+            evtSF *= myCorr->GetTopPtReweight(gens);
+
+        //==== pileup jet ID SF: PU ID 적용 전, away jet pT 컷(40)을 넘는 jet 대상
+        if (Run == 2) {
+            RVec<Jet> sfJets;
+            for (const auto &jet : jetsNoPuId)
+                if (jet.Pt() > cuts.awayjet_pt) sfJets.push_back(jet);
+            unordered_map<int, int> matchedIdx =
+                GenJetMatching(sfJets, genJets, fixedGridRhoFastjetAll, 0.4, 10.);
+            evtSF *= myCorr->GetPileupJetIDSF(sfJets, matchedIdx, "loose");
+        }
+    }
 
     //==== Step 6: 트리거 경로(Mu8 / Mu17)마다 측정
     for (const auto &path : paths) {
@@ -126,6 +187,7 @@ void fake::executeEvent() {
             weight = MCweight() * ev.GetTriggerLumi(path.trigger);
             weight *= GetL1PrefireWeight();
             weight *= myCorr->GetPUWeight(ev.nTrueInt());
+            weight *= evtSF;   // top pT reweight + pileup jet ID SF
         }
 
         measureFakeRate(path, weight);    // fake rate 측정 영역
@@ -147,6 +209,9 @@ void fake::measureFakeRate(const TriggerPath &path, float weight) {
 
     const Muon &mu = looseMuons.at(0);
 
+    //==== muon RECO SF (공식 측정과 동일하게 측정 대상 muon 에 적용)
+    if (!IsDATA) weight *= myCorr->GetMuonRECOSF(mu);
+
     //==== Step 2: 트리거별 muon pT 컷 (Mu8: 10, Mu17: 20)
     if (mu.Pt() < path.ptCut) return;
 
@@ -166,6 +231,10 @@ void fake::measureFakeRate(const TriggerPath &path, float weight) {
     RVec<TString> tags = {"loose"};
     if (isTight) tags.push_back("tight");
 
+    //==== overflow 는 마지막 bin 에 넣는다
+    const float xval = min(ptCorr, ptCorrBins.back() - 0.1f);
+    const float yval = fabs(mu.Eta());
+
     //==== away jet pT 컷을 바꿔가며 반복 (Central = 40, syst = 30 / 60)
     for (const auto &syst : systs) {
         float awayJetPtCut = cuts.awayjet_pt;
@@ -183,23 +252,26 @@ void fake::measureFakeRate(const TriggerPath &path, float weight) {
         if (!hasAwayJet) continue;
 
         //==== Inclusive (validation) 영역: MET / MT 컷 없이 kinematics 채움
+        //==== 공식(MeasFakeRateV4) QCD MC FR 은 이 영역에서 측정되므로
+        //==== 비교용 2D FR 히스토그램도 같이 채운다
         if (syst == "Central") {
             for (const auto &tag : tags) {
                 fillMuonKinematics(path.name + "/Inclusive/" + tag,
                                    mu, ptCorr, MT, nJets, weight);
-                if (!IsDATA)
+                FillHist(path.name + "/Inclusive/" + tag + "/fake_ptcorr_abseta",
+                         xval, yval, weight, ptCorrBins, absEtaBins);
+                if (!IsDATA) {
                     fillMuonKinematics(path.name + "/Inclusive/" + tag + "/" + ltype,
                                        mu, ptCorr, MT, nJets, weight);
+                    FillHist(path.name + "/Inclusive/" + tag + "/" + ltype + "/fake_ptcorr_abseta",
+                             xval, yval, weight, ptCorrBins, absEtaBins);
+                }
             }
         }
 
         //==== Step 5: 측정 영역 컷 (W/Z 의 prompt muon 오염 억제)
         if (!(METv.Pt() < cuts.met_max)) continue;
         if (!(MT < cuts.mt_max)) continue;
-
-        //==== overflow 는 마지막 bin 에 넣는다
-        const float xval = min(ptCorr, ptCorrBins.back() - 0.1f);
-        const float yval = fabs(mu.Eta());
 
         //==== FR 계산용 2D 히스토그램 (cone-corrected pT x |eta|)
         const TString base = path.name + "/MeasReg/" + syst;
@@ -235,6 +307,9 @@ void fake::fillZEnriched(const TriggerPath &path, const Event &ev, float weight)
 
     const Muon &mu1 = tightMuons.at(0);
     const Muon &mu2 = tightMuons.at(1);
+
+    //==== muon RECO SF (공식 측정과 동일하게 두 muon 모두에 적용)
+    if (!IsDATA) weight *= myCorr->GetMuonRECOSF(tightMuons);
 
     //==== Step 2: opposite sign + pT 컷 (leading 은 트리거별 컷, subleading 은 10)
     if (mu1.Charge() + mu2.Charge() != 0) return;
