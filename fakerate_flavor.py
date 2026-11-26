@@ -340,7 +340,7 @@ def map2d_draw():
     c = TCanvas("frmap_c", "", 900, 600)
     c.SetLeftMargin(0.12); c.SetRightMargin(0.14); c.SetTopMargin(0.08); c.SetBottomMargin(0.13)
     h.Draw("COLZ TEXT")
-    cms_ = TLatex(); cms_.SetTextSize(0.045); cms_.SetTextFont(61); cms_.DrawLatexNDC(0.12, 0.93, "CMS")
+    cms_ = TLatex(); cms_.SetTextSize(0.045); cms_.SetTextFont(62); cms_.DrawLatexNDC(0.12, 0.93, "CMS #scale[0.76]{#font[52]{Simulation}}")
     lab_ = TLatex(); lab_.SetTextSize(0.033); lab_.SetTextFont(42); lab_.SetTextAlign(31)
     lab_.DrawLatexNDC(0.86, 0.93, "2024 (v15), QCD MuEnriched, binned fake rate")
     out = os.path.join(os.path.dirname(NN_OUT), "FR_binned.png")
@@ -374,7 +374,7 @@ def map1d_draw():
         lg.AddEntry(g, f"{ee[j]:.1f} < |#eta| < {ee[j + 1]:.1f}", "lp")
         keep.append(g)
     lg.Draw()
-    cms_ = TLatex(); cms_.SetTextSize(0.045); cms_.SetTextFont(61); cms_.DrawLatexNDC(0.12, 0.93, "CMS")
+    cms_ = TLatex(); cms_.SetTextSize(0.045); cms_.SetTextFont(62); cms_.DrawLatexNDC(0.12, 0.93, "CMS #scale[0.76]{#font[52]{Simulation}}")
     lab_ = TLatex(); lab_.SetTextSize(0.033); lab_.SetTextFont(42); lab_.SetTextAlign(31)
     lab_.DrawLatexNDC(0.92, 0.93, "2024 (v15), QCD MuEnriched")
     c.RedrawAxis()
@@ -617,7 +617,7 @@ def make_combined_graph(hists, iy):
     return g
 
 
-cms = TLatex(); cms.SetTextSize(0.045); cms.SetTextFont(61)
+cms = TLatex(); cms.SetTextSize(0.045); cms.SetTextFont(62)   # 62: precision 2, so the markup below is parsed
 label = TLatex(); label.SetTextSize(0.033); label.SetTextFont(42); label.SetTextAlign(31)
 
 
@@ -652,7 +652,7 @@ def draw_one(iy, tag_suffix, eta_text):
     for _, g in graphs:
         g.Draw("P same")
     legend.Draw()
-    cms.DrawLatexNDC(0.12, 0.93, "CMS")
+    cms.DrawLatexNDC(0.12, 0.93, "CMS #scale[0.76]{#font[52]{Simulation}}")
     schemeName = "gen-jet" if scheme == "genflav" else "reco-jet"
     if os.environ.get('FLAVCOL') == "flavor_dr":
         schemeName = "reco-jet (dR<0.4)"
